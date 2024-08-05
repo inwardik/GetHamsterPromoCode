@@ -1,22 +1,28 @@
 import json
 import logging
 import random
-import re
 import time
 from datetime import datetime
+from uuid import uuid4
 
 import requests
 
-from tokens import APP_TOKEN, PROMO_ID
+from settings import APP_TOKEN, PROMO_ID, API_URL
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
 class HamsterCode:
-    def __init__(self, game_timeout=40):
-        self.login_token = None
-        self.game_timeout = game_timeout
+    game_timeout = 40
+    login_token = None
+    tokens = []
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+
+    @classmethod
+    def _timeout(cls) -> None:
+        logger.info(f"Waiting for {cls.game_timeout} seconds...")
+        time.sleep(cls.game_timeout)
 
     @staticmethod
     def _get_random_client_id() -> str:
@@ -24,42 +30,25 @@ class HamsterCode:
         rnd = ''.join([str(random.randint(0, 9)) for _ in range(19)])
         return f'{dt}-{rnd}'
 
-    @staticmethod
-    def _generate_uuid():
-        def replacer(match):
-            char = match.group(0)
-            if char == 'x':
-                return hex(random.randint(0, 15))[2:]
-            elif char == 'y':
-                return hex(random.randint(8, 11))[2:]
-
-        pattern = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
-        return re.sub(r'[xy]', replacer, pattern)
-
-    def _login(self):
-        headers = {
-            "content-type": "application/json; charset=utf-8",
-        }
-
-        body = {
-            "appToken": APP_TOKEN,
-            "clientId": self._get_random_client_id(),
-            "clientOrigin": "deviceid",
-        }
-        r = requests.post("https://api.gamepromo.io/promo/login-client", headers=headers, json=body)
+    def _login(self) -> None:
+        r = requests.post(
+            url=f"{API_URL}/login-client",
+            headers=self.headers,
+            json={
+                "appToken": APP_TOKEN,
+                "clientId": self._get_random_client_id(),
+                "clientOrigin": "deviceid",
+            }
+        )
         logger.debug(r)
         token = json.loads(r.content).get('clientToken')
         logger.info(token)
         self.login_token = token
+        self.headers.update({"authorization": f"Bearer {self.login_token}"})
 
     def _register_event(self) -> bool:
-        event_id = self._generate_uuid()
+        event_id = str(uuid4())
         logger.debug(event_id)
-
-        headers = {
-            "authorization": f"Bearer {self.login_token}",
-            "Content-Type": "application/json; charset=utf-8",
-          }
 
         body = {
             "promoId": PROMO_ID,
@@ -67,11 +56,11 @@ class HamsterCode:
             "eventOrigin": "undefined",
         }
 
-        time.sleep(self.game_timeout)
+        self._timeout()
 
         for _ in range(6):
             logger.info("Emulate one game event")
-            r = requests.post("https://api.gamepromo.io/promo/register-event", headers=headers, json=body)
+            r = requests.post(url=f"{API_URL}/register-event", headers=self.headers, json=body)
             logger.debug(r)
             has_code = json.loads(r.content).get('hasCode')
             logger.debug(f'{has_code=}')
@@ -79,20 +68,15 @@ class HamsterCode:
                 logger.info("Got it!")
                 return True
             logger.info("Game finished, there is no code as a result. Waiting for the next one...")
-            time.sleep(self.game_timeout)
+            self._timeout()
         return False
 
-    def _request_code(self):
-        headers = {
-            "authorization": f"Bearer {self.login_token}",
-            "Content-Type": "application/json; charset=utf-8",
-          }
-
+    def _request_code(self) -> str:
         body = {
             "promoId": PROMO_ID,
         }
 
-        r = requests.post("https://api.gamepromo.io/promo/create-code", headers=headers, json=body)
+        r = requests.post(f"{API_URL}/create-code", headers=self.headers, json=body)
         logger.debug(r)
 
         return json.loads(r.content).get('promoCode')
@@ -104,7 +88,8 @@ class HamsterCode:
 
 
 if __name__ == '__main__':
+    generated_codes = []
     for i in range(4):
         code_generator = HamsterCode()
-        code = code_generator.get_code()
-        print(code)
+        generated_codes.append(code_generator.get_code())
+        print(code_generator.tokens)
