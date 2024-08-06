@@ -14,8 +14,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(leve
 
 
 class HamsterCode:
-    game_timeout = 40
-    login_token = None
+    game_timeout = random.randint(45, 60)
     tokens = []
     headers = {"Content-Type": "application/json; charset=utf-8"}
 
@@ -43,8 +42,7 @@ class HamsterCode:
         logger.debug(r)
         token = json.loads(r.content).get('clientToken')
         logger.info(token)
-        self.login_token = token
-        self.headers.update({"authorization": f"Bearer {self.login_token}"})
+        self.headers.update({"authorization": f"Bearer {token}"})
 
     def _register_event(self) -> bool:
         event_id = str(uuid4())
@@ -92,4 +90,4 @@ if __name__ == '__main__':
     for i in range(4):
         code_generator = HamsterCode()
         generated_codes.append(code_generator.get_code())
-        print(code_generator.tokens)
+        print(generated_codes)
