@@ -1,93 +1,122 @@
-import json
+import asyncio
 import logging
 import random
-import time
 from datetime import datetime
 from uuid import uuid4
 
-import requests
-
-from settings import APP_TOKEN, PROMO_ID, API_URL
+import aiohttp
+from settings import API_URL, GAMES, BOT_TOKEN, CHAT_ID
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
-class HamsterCode:
-    game_timeout = random.randint(45, 60)
-    tokens = []
-    headers = {"Content-Type": "application/json; charset=utf-8"}
+class HamsterGame:
+    def __init__(self, name, token, promo_id, timeout, max_codes, max_retry):
+        self.name = name
+        self.token = token
+        self.promo_id = promo_id
+        self.timeout = timeout
+        self.max_codes = max_codes
+        self.max_retry = max_retry
+        self.codes = set()
+        self.last_promo_code = None
 
-    @classmethod
-    def _timeout(cls) -> None:
-        logger.info(f"Waiting for {cls.game_timeout} seconds...")
-        time.sleep(cls.game_timeout)
+    def log(self, msg):
+        logger.info(f"({self.name.upper()}) - {msg}")
 
     @staticmethod
-    def _get_random_client_id() -> str:
+    def get_random_client_id() -> str:
         dt = str(round(datetime.now().timestamp() * 1000))
         rnd = ''.join([str(random.randint(0, 9)) for _ in range(19)])
         return f'{dt}-{rnd}'
 
-    def _login(self) -> None:
-        r = requests.post(
-            url=f"{API_URL}/login-client",
-            headers=self.headers,
-            json={
-                "appToken": APP_TOKEN,
-                "clientId": self._get_random_client_id(),
-                "clientOrigin": "deviceid",
-            }
-        )
-        logger.debug(r)
-        token = json.loads(r.content).get('clientToken')
-        logger.info(token)
-        self.headers.update({"authorization": f"Bearer {token}"})
+    async def authenticate(self, session):
+        async with session.post(
+                url=f"{API_URL}/login-client",
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                json={
+                    "appToken": self.token,
+                    "clientId": self.get_random_client_id(),
+                    "clientOrigin": "deviceid",
+                }
+        ) as response:
+            data = await response.json()
+            sleep_time = random.randint(*self.timeout)
+            self.log(f"Auth is OK. Waiting for {sleep_time} second(s)...")
+            await asyncio.sleep(sleep_time)
+            return data['clientToken']
 
-    def _register_event(self) -> bool:
-        event_id = str(uuid4())
-        logger.debug(event_id)
-
+    async def get_event_code(self, session, token):
+        headers = {
+            'Authorization': f'Bearer {token}',
+            "Content-Type": "application/json; charset=utf-8",
+        }
         body = {
-            "promoId": PROMO_ID,
-            "eventId": event_id,
+            "promoId": self.promo_id,
+        }
+
+        async with session.post(url=f"{API_URL}/create-code", headers=headers, json=body) as response:
+            code = await response.json()
+            promo_code = code['promoCode']
+            self.log(f"Game promo code received: {promo_code}")
+            self.codes.add(promo_code)
+            self.last_promo_code = promo_code
+
+    async def register_event(self, session, token):
+        headers = {
+            'Authorization': f'Bearer {token}',
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        body = {
+            "promoId": self.promo_id,
+            "eventId": str(uuid4()),
             "eventOrigin": "undefined",
         }
+        for attempt in range(self.max_retry):
+            sleep_time = random.randint(*self.timeout)
+            async with session.post(
+                    url=f"{API_URL}/register-event",
+                    headers=headers,
+                    json=body
+            ) as response:
+                response_json = await response.json()
+                if response_json.get('hasCode'):
+                    return response_json.get('hasCode')
+                else:
+                    self.log("No code found. Trying again...")
+                if attempt < self.max_retry - 1:
+                    self.log(f"Waiting for the next try after {sleep_time} second(s)...")
+                    await asyncio.sleep(sleep_time)
 
-        self._timeout()
-
-        for _ in range(6):
-            logger.info("Emulate one game event")
-            r = requests.post(url=f"{API_URL}/register-event", headers=self.headers, json=body)
-            logger.debug(r)
-            has_code = json.loads(r.content).get('hasCode')
-            logger.debug(f'{has_code=}')
-            if has_code:
-                logger.info("Got it!")
-                return True
-            logger.info("Game finished, there is no code as a result. Waiting for the next one...")
-            self._timeout()
-        return False
-
-    def _request_code(self) -> str:
-        body = {
-            "promoId": PROMO_ID,
-        }
-
-        r = requests.post(f"{API_URL}/create-code", headers=self.headers, json=body)
-        logger.debug(r)
-
-        return json.loads(r.content).get('promoCode')
-
-    def get_code(self) -> str:
-        self._login()
-        if self._register_event():
-            return self._request_code()
+    async def start_game(self, session):
+        while not len(self.codes) == self.max_codes:
+            token = await self.authenticate(session)
+            code = await self.register_event(session, token)
+            if code not in self.codes:
+                await self.get_event_code(session, token)
+        self.log(f"Finished search codes: {list(self.codes)}")
+        return list(self.codes)
 
 
-if __name__ == '__main__':
-    generated_codes = []
-    for i in range(4):
-        code_generator = HamsterCode()
-        generated_codes.append(code_generator.get_code())
-        print(generated_codes)
+async def main():
+    async with aiohttp.ClientSession() as session:
+        tasks = [HamsterGame(**game).start_game(session) for game in GAMES]
+        game_codes = await asyncio.gather(*tasks)
+        for game in game_codes:
+            for code in game:
+                print(code)
+
+            if BOT_TOKEN and CHAT_ID:
+                await session.post(
+                    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": CHAT_ID,
+                        "text": '\n\r'.join([f"`{g}`\n\r" for g in game]),
+                        "parse_mode": "Markdown"
+                    }
+                )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
